@@ -1,0 +1,10 @@
+[package]
+name = "git-log-stream"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Streaming parser for git log output that never buffers the whole history"
+repository = "https://github.com/pescobar959/git-log-stream"
+readme = "README.md"
+
+[dependencies]
