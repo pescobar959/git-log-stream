@@ -70,10 +70,11 @@ makes it easy to test against a fixed byte string instead of spawning `git`:
 ```rust
 use git_log_stream::CommitReader;
 
-let input = b"\x1eabc123\x1fJane Doe\x1fjane@example.com\x1f1700000000\x1ffix the thing\n";
+let input = b"\x1eabc123\x1fdef456\x1fJane Doe\x1fjane@example.com\x1f1700000000\x1ffix the thing\n";
 let mut commits = CommitReader::new(&input[..]);
 let commit = commits.next().unwrap().unwrap();
 assert_eq!(commit.hash, "abc123");
+assert_eq!(commit.parents, vec!["def456"]);
 ```
 
 ## Why `%x1e` / `%x1f`
@@ -88,9 +89,9 @@ metadata, so splitting on them is safe without any escaping.
 
 ## Status
 
-Early. The commit format currently covers hash, author name, author email,
-author timestamp, and subject. See the roadmap in the repo for what's next —
-diffstats, parent hashes, and a way to bound how much of the stream is read
+Early. The commit format currently covers hash, parent hashes, author name,
+author email, author timestamp, and subject. See the roadmap in the repo for
+what's next — diffstats and a way to bound how much of the stream is read
 are the main gaps.
 
 ## License

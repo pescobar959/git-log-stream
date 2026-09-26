@@ -6,6 +6,9 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
     pub hash: String,
+    /// Hashes of this commit's parents, in the order git reports them.
+    /// Empty for a root commit, length two or more for a merge.
+    pub parents: Vec<String>,
     pub author_name: String,
     pub author_email: String,
     pub author_time: i64,

@@ -10,12 +10,13 @@ use crate::commit::Commit;
 /// can be split without depending on newlines inside commit subjects. `%x1f`
 /// (ASCII unit separator) separates the fields within a record. Neither byte
 /// can legally appear in the fields git fills in here, so no escaping is
-/// needed.
-pub const LOG_FORMAT: &str = "%x1e%H%x1f%an%x1f%ae%x1f%at%x1f%s";
+/// needed. `%P` is the space-separated list of parent hashes; it's empty for
+/// a root commit and has two or more entries for a merge.
+pub const LOG_FORMAT: &str = "%x1e%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s";
 
 const RECORD_SEP: u8 = 0x1e;
 const FIELD_SEP: u8 = 0x1f;
-const FIELD_COUNT: usize = 5;
+const FIELD_COUNT: usize = 6;
 
 /// Errors that can occur while reading or parsing a commit stream.
 #[derive(Debug)]
@@ -108,18 +109,31 @@ fn parse_record(bytes: &[u8]) -> Result<Commit, GitLogError> {
 
     let mut fields = text.splitn(FIELD_COUNT, FIELD_SEP as char);
     let hash = fields.next();
+    let parents = fields.next();
     let author_name = fields.next();
     let author_email = fields.next();
     let author_time = fields.next();
     let subject = fields.next();
 
-    match (hash, author_name, author_email, author_time, subject) {
-        (Some(hash), Some(author_name), Some(author_email), Some(author_time), Some(subject)) => {
+    match (hash, parents, author_name, author_email, author_time, subject) {
+        (
+            Some(hash),
+            Some(parents),
+            Some(author_name),
+            Some(author_email),
+            Some(author_time),
+            Some(subject),
+        ) => {
             let author_time = author_time
                 .parse::<i64>()
                 .map_err(|_| GitLogError::Malformed(text.to_string()))?;
+            let parents = parents
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
             Ok(Commit {
                 hash: hash.to_string(),
+                parents,
                 author_name: author_name.to_string(),
                 author_email: author_email.to_string(),
                 author_time,
@@ -134,9 +148,18 @@ fn parse_record(bytes: &[u8]) -> Result<Commit, GitLogError> {
 mod tests {
     use super::*;
 
-    fn record(hash: &str, name: &str, email: &str, time: &str, subject: &str) -> Vec<u8> {
+    fn record(
+        hash: &str,
+        parents: &str,
+        name: &str,
+        email: &str,
+        time: &str,
+        subject: &str,
+    ) -> Vec<u8> {
         let mut out = vec![RECORD_SEP];
         out.extend(hash.as_bytes());
+        out.push(FIELD_SEP);
+        out.extend(parents.as_bytes());
         out.push(FIELD_SEP);
         out.extend(name.as_bytes());
         out.push(FIELD_SEP);
@@ -151,10 +174,18 @@ mod tests {
 
     #[test]
     fn parses_a_single_commit() {
-        let input = record("abc123", "Jane Doe", "jane@example.com", "1700000000", "fix bug");
+        let input = record(
+            "abc123",
+            "parent1",
+            "Jane Doe",
+            "jane@example.com",
+            "1700000000",
+            "fix bug",
+        );
         let mut reader = CommitReader::new(input.as_slice());
         let commit = reader.next().unwrap().unwrap();
         assert_eq!(commit.hash, "abc123");
+        assert_eq!(commit.parents, vec!["parent1"]);
         assert_eq!(commit.author_name, "Jane Doe");
         assert_eq!(commit.author_email, "jane@example.com");
         assert_eq!(commit.author_time, 1700000000);
@@ -164,20 +195,30 @@ mod tests {
 
     #[test]
     fn parses_multiple_commits_in_sequence() {
-        let mut input = record("aaa", "A", "a@example.com", "1", "first");
-        input.extend(record("bbb", "B", "b@example.com", "2", "second"));
+        let mut input = record("aaa", "", "A", "a@example.com", "1", "first");
+        input.extend(record("bbb", "aaa", "B", "b@example.com", "2", "second"));
         let reader = CommitReader::new(input.as_slice());
         let commits: Vec<Commit> = reader.map(|r| r.unwrap()).collect();
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].hash, "aaa");
+        assert!(commits[0].parents.is_empty());
         assert_eq!(commits[1].hash, "bbb");
+        assert_eq!(commits[1].parents, vec!["aaa"]);
+    }
+
+    #[test]
+    fn merge_commit_has_multiple_parents() {
+        let input = record("mmm", "aaa bbb", "M", "m@example.com", "3", "merge");
+        let mut reader = CommitReader::new(input.as_slice());
+        let commit = reader.next().unwrap().unwrap();
+        assert_eq!(commit.parents, vec!["aaa", "bbb"]);
     }
 
     #[test]
     fn subject_may_contain_extra_unit_separators() {
-        // splitn(5, ..) means only the first four separators split fields;
-        // anything after that stays part of the subject verbatim.
-        let input = record("aaa", "A", "a@example.com", "1", "weird\x1fsubject");
+        // splitn(FIELD_COUNT, ..) means only the separators up to the last
+        // field split; anything after that stays part of the subject verbatim.
+        let input = record("aaa", "", "A", "a@example.com", "1", "weird\x1fsubject");
         let mut reader = CommitReader::new(input.as_slice());
         let commit = reader.next().unwrap().unwrap();
         assert_eq!(commit.subject, "weird\x1fsubject");
