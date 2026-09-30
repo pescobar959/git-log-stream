@@ -17,5 +17,5 @@
 mod commit;
 mod parser;
 
-pub use commit::Commit;
-pub use parser::{CommitReader, GitLogError, LOG_FORMAT};
+pub use commit::{Commit, FileStat, StatCommit};
+pub use parser::{CommitReader, GitLogError, StatReader, LOG_FORMAT};

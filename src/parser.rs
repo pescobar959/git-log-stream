@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read};
 
-use crate::commit::Commit;
+use crate::commit::{Commit, FileStat, StatCommit};
 
 /// The `git log --format=` string this crate expects as input.
 ///
@@ -60,15 +60,13 @@ impl From<io::Error> for GitLogError {
 /// from earlier or later commits is retained, so memory use stays flat no
 /// matter how long the history is.
 pub struct CommitReader<R: Read> {
-    reader: BufReader<R>,
-    buf: Vec<u8>,
+    records: RecordReader<R>,
 }
 
 impl<R: Read> CommitReader<R> {
     pub fn new(reader: R) -> Self {
         CommitReader {
-            reader: BufReader::new(reader),
-            buf: Vec::new(),
+            records: RecordReader::new(reader),
         }
     }
 }
@@ -77,6 +75,58 @@ impl<R: Read> Iterator for CommitReader<R> {
     type Item = Result<Commit, GitLogError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        match self.records.next_record()? {
+            Ok(bytes) => Some(parse_record(bytes)),
+            Err(e) => Some(Err(GitLogError::Io(e))),
+        }
+    }
+}
+
+/// Like [`CommitReader`], but for a stream produced with [`LOG_FORMAT`] and
+/// `--numstat`. Each item is a [`StatCommit`] carrying the per-file line
+/// counts git prints after the format line.
+///
+/// Merge commits get an empty `files` list because `git log --numstat` does
+/// not diff merges unless asked to with `-m`, `-c` or `--cc`.
+pub struct StatReader<R: Read> {
+    records: RecordReader<R>,
+}
+
+impl<R: Read> StatReader<R> {
+    pub fn new(reader: R) -> Self {
+        StatReader {
+            records: RecordReader::new(reader),
+        }
+    }
+}
+
+impl<R: Read> Iterator for StatReader<R> {
+    type Item = Result<StatCommit, GitLogError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.records.next_record()? {
+            Ok(bytes) => Some(parse_stat_record(bytes)),
+            Err(e) => Some(Err(GitLogError::Io(e))),
+        }
+    }
+}
+
+/// Splits the stream into raw records on the record separator, reusing one
+/// buffer so only a single record is ever held.
+struct RecordReader<R: Read> {
+    reader: BufReader<R>,
+    buf: Vec<u8>,
+}
+
+impl<R: Read> RecordReader<R> {
+    fn new(reader: R) -> Self {
+        RecordReader {
+            reader: BufReader::new(reader),
+            buf: Vec::new(),
+        }
+    }
+
+    fn next_record(&mut self) -> Option<io::Result<&[u8]>> {
         loop {
             self.buf.clear();
             match self.reader.read_until(RECORD_SEP, &mut self.buf) {
@@ -95,18 +145,60 @@ impl<R: Read> Iterator for CommitReader<R> {
                     if self.buf.is_empty() {
                         continue;
                     }
-                    return Some(parse_record(&self.buf));
+                    return Some(Ok(&self.buf));
                 }
-                Err(e) => return Some(Err(GitLogError::Io(e))),
+                Err(e) => return Some(Err(e)),
             }
         }
     }
 }
 
-fn parse_record(bytes: &[u8]) -> Result<Commit, GitLogError> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| GitLogError::Malformed(String::from_utf8_lossy(bytes).into_owned()))?;
+fn decode(bytes: &[u8]) -> Result<&str, GitLogError> {
+    std::str::from_utf8(bytes)
+        .map_err(|_| GitLogError::Malformed(String::from_utf8_lossy(bytes).into_owned()))
+}
 
+fn parse_record(bytes: &[u8]) -> Result<Commit, GitLogError> {
+    parse_fields(decode(bytes)?)
+}
+
+fn parse_stat_record(bytes: &[u8]) -> Result<StatCommit, GitLogError> {
+    let text = decode(bytes)?;
+    // %s never contains a newline, so the first one ends the format line and
+    // everything after it is numstat output.
+    let (head, stats) = match text.split_once('\n') {
+        Some((head, stats)) => (head, stats),
+        None => (text, ""),
+    };
+    let commit = parse_fields(head)?;
+
+    let mut files = Vec::new();
+    for line in stats.lines().filter(|l| !l.is_empty()) {
+        let mut parts = line.splitn(3, '\t');
+        let (added, deleted, path) = match (parts.next(), parts.next(), parts.next()) {
+            (Some(a), Some(d), Some(p)) => (a, d, p),
+            _ => return Err(GitLogError::Malformed(text.to_string())),
+        };
+        files.push(FileStat {
+            added: parse_count(added, text)?,
+            deleted: parse_count(deleted, text)?,
+            path: path.to_string(),
+        });
+    }
+    Ok(StatCommit { commit, files })
+}
+
+/// Binary files are reported as `-`, which maps to `None`.
+fn parse_count(s: &str, record: &str) -> Result<Option<u64>, GitLogError> {
+    if s == "-" {
+        return Ok(None);
+    }
+    s.parse::<u64>()
+        .map(Some)
+        .map_err(|_| GitLogError::Malformed(record.to_string()))
+}
+
+fn parse_fields(text: &str) -> Result<Commit, GitLogError> {
     let mut fields = text.splitn(FIELD_COUNT, FIELD_SEP as char);
     let hash = fields.next();
     let parents = fields.next();
@@ -228,6 +320,58 @@ mod tests {
     fn empty_input_yields_no_commits() {
         let reader = CommitReader::new(&b""[..]);
         assert_eq!(reader.count(), 0);
+    }
+
+    fn stat_record(header: Vec<u8>, stats: &str) -> Vec<u8> {
+        // header ends in "\n" already; git puts a blank line before numstat.
+        let mut out = header;
+        out.push(b'\n');
+        out.extend(stats.as_bytes());
+        out
+    }
+
+    #[test]
+    fn stat_reader_parses_file_counts() {
+        let mut input = stat_record(
+            record("aaa", "", "A", "a@example.com", "1", "first"),
+            "3\t1\tsrc/lib.rs\n-\t-\tlogo.png\n0\t5\tdir/old name.txt\n",
+        );
+        input.extend(record("bbb", "aaa", "B", "b@example.com", "2", "empty"));
+        let commits: Vec<StatCommit> = StatReader::new(input.as_slice())
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].commit.subject, "first");
+        assert_eq!(
+            commits[0].files,
+            vec![
+                FileStat { added: Some(3), deleted: Some(1), path: "src/lib.rs".into() },
+                FileStat { added: None, deleted: None, path: "logo.png".into() },
+                FileStat { added: Some(0), deleted: Some(5), path: "dir/old name.txt".into() },
+            ]
+        );
+        assert_eq!(commits[1].commit.hash, "bbb");
+        assert!(commits[1].files.is_empty());
+    }
+
+    #[test]
+    fn stat_reader_rejects_a_bad_count() {
+        let input = stat_record(
+            record("aaa", "", "A", "a@example.com", "1", "first"),
+            "x\t1\tfile\n",
+        );
+        let mut reader = StatReader::new(input.as_slice());
+        assert!(matches!(reader.next(), Some(Err(GitLogError::Malformed(_)))));
+    }
+
+    #[test]
+    fn stat_reader_rejects_a_line_without_a_path() {
+        let input = stat_record(
+            record("aaa", "", "A", "a@example.com", "1", "first"),
+            "1\t2\n",
+        );
+        let mut reader = StatReader::new(input.as_slice());
+        assert!(matches!(reader.next(), Some(Err(GitLogError::Malformed(_)))));
     }
 
     #[test]

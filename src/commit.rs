@@ -14,3 +14,22 @@ pub struct Commit {
     pub author_time: i64,
     pub subject: String,
 }
+
+/// Line counts for one file in a commit, from `git log --numstat`.
+///
+/// `added` and `deleted` are `None` for binary files, where git prints `-`
+/// instead of a number. `path` is exactly what git printed, so renames show up
+/// in git's `old => new` form and unusual names may be C-quoted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStat {
+    pub added: Option<u64>,
+    pub deleted: Option<u64>,
+    pub path: String,
+}
+
+/// A commit plus the files it touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatCommit {
+    pub commit: Commit,
+    pub files: Vec<FileStat>,
+}

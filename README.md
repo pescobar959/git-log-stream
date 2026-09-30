@@ -77,6 +77,20 @@ assert_eq!(commit.hash, "abc123");
 assert_eq!(commit.parents, vec!["def456"]);
 ```
 
+## Diffstats
+
+To get per-file line counts, pass `--numstat` along with the same format
+string and read the stream with `StatReader` instead of `CommitReader`:
+
+```sh
+git log --numstat --format='%x1e%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s'
+```
+
+Each item is a `StatCommit` with the usual `commit` and a `files` list of
+`FileStat { added, deleted, path }`. Binary files have `None` for both
+counts. Merge commits have no files unless you also pass `-m`, `-c` or
+`--cc`.
+
 ## Why `%x1e` / `%x1f`
 
 Commit subjects can contain almost anything, including newlines (for the
@@ -90,9 +104,9 @@ metadata, so splitting on them is safe without any escaping.
 ## Status
 
 Early. The commit format currently covers hash, parent hashes, author name,
-author email, author timestamp, and subject. See the roadmap in the repo for
-what's next — diffstats and a way to bound how much of the stream is read
-are the main gaps.
+author email, author timestamp, and subject, with optional per-file
+diffstats through `StatReader`. A helper that spawns `git log` itself and
+tests against malformed streams are next.
 
 ## License
 
